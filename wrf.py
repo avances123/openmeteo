@@ -2,11 +2,11 @@ from osgeo import gdal,gdalconst,ogr,osr
 import sys
 import numpy as np
 from scipy import interpolate
-import re
 import psycopg2
 from psycopg2.extras import DictCursor
 
-
+NUM_HORIZ=2
+VARS = ['temp2m','wind10m_v','wind10m_u']
 try:
     conn = psycopg2.connect("dbname='openmeteo'")
 except:
@@ -21,22 +21,27 @@ def get_stations(minLon=-45.6607629, minLat=26.4099379, maxLon=53.7130834, maxLa
     cur.close()  
     return l
 
-def insert_pred(icao,var,pasada,horiz,data):
+def insert_pred(pasada,predicciones):
     cur = conn.cursor()
-    cur.execute("""INSERT INTO wrf (icao,pasada,horiz,%s) VALUES ('%s',to_timestamp('%s','YYYYMMDDHH24'),'%s',%f)""" % (var,icao,pasada,horiz,data))
-    conn.commit()
+    for var in predicciones.keys():
+        for horiz in range(1,NUM_HORIZ):
+            for icao in predicciones[var][horiz].keys():
+                try:
+                    cur.execute("""
+                        INSERT INTO wrf (icao,pasada,horiz,temp2m,wind10m_v,wind10m_u) 
+                        VALUES ('%s',to_timestamp('%s','YYYYMMDDHH24'),'%s',%f,%f,%f)
+                        """ % (var,icao,pasada,horiz,predicciones[var][horiz].get(icao)))
+                except psycopg2.IntegrityError:
+                    conn.rollback()
+                else:
+                    conn.commit()
     cur.close()
 
 
-def main(filepath):
+def interpolate_raster(filepath,estaciones):
     """
     http://gis.stackexchange.com/a/42846/4100
     """
-    m = re.search('pp-(.+)\.(\d{10})_(\d)',filepath)
-    var = m.group(1)
-    pasada = m.group(2)
-    horiz = m.group(3)
-    print var,pasada,horiz
     raster = gdal.Open(filepath,gdalconst.GA_ReadOnly)
     valores = raster.ReadAsArray() #(262, 695)
     upper_left_x, x_size, x_rotation, upper_left_y, y_rotation, y_size = raster.GetGeoTransform()
@@ -49,17 +54,32 @@ def main(filepath):
     validos = valores[y_index,x_index]
 
 
-    estaciones = get_stations()
-    print "Num estaciones: %d" % len(estaciones)
+    resultado = {}
     puntos = []
     for i in estaciones:
         puntos.append([i['lon'],i['lat']])
     interp = interpolate.griddata(coords, validos, puntos, method='linear', fill_value=255)
 
     for i,estacion in enumerate(estaciones):
-        insert_pred(estacion['icao'],var,pasada,horiz,interp[i])
+        resultado[estacion['icao']] = interp[i]
+    return resultado
     
         
+
+def main(pasada):
+    estaciones = get_stations()
+    predicciones = {}
+    for var in VARS:
+        predicciones[var] = {}
+        for horiz in range(1,NUM_HORIZ):
+            filepath = "tiffs/pp-%s.%s_%s.tif" % (var,pasada,horiz)
+            print "Processing %s" % filepath
+            predicciones[var][horiz] = interpolate_raster(filepath,estaciones)
+            print predicciones
+
+    insert_pred(pasada,predicciones)
+            
+
 
 main(sys.argv[1])
 conn.close()
