@@ -1,2 +1,4 @@
 *.tif
 *.aux.xml
+tiffs
+*.qgs~
